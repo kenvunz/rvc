@@ -54,7 +54,7 @@ define(['ractive'], function (Ractive) {
               load.fromText(compiled);
             } else load(compiled);
           }, load.error, config);
-        }, load.error);
+        }, load.error, ext);
       },
       write: function (pluginName, moduleName, write) {
         var compiled = this.buildCache[moduleName];
@@ -132,8 +132,10 @@ define(['ractive'], function (Ractive) {
       xhr.send(null);
     };
   } else if (typeof process !== "undefined" && process.versions && !!process.versions.node) {
-    var fs = requirejs.nodeRequire("fs");
-    loader.fetch = function (path, callback) {
+    var fs = requirejs.nodeRequire("fs"),
+        p = requirejs.nodeRequire("path");
+    loader.fetch = function (path, callback, errback, ext) {
+      if (p.extname(path) === "") path += "." + ext;
       callback(fs.readFileSync(path, "utf8"));
     };
   } else if (typeof Packages !== "undefined") {
@@ -184,6 +186,8 @@ define(['ractive'], function (Ractive) {
 
   var amdLoader = loader;
 
+  var src_getName = getName;
+
   function getName(path) {
   	var pathParts, filename, lastIndex;
 
@@ -209,40 +213,42 @@ define(['ractive'], function (Ractive) {
        * @property {number} column - the zero-based column index
        * @property {number} char - the character index that was passed in
    */
-
+  var utils_getLinePosition = getLinePosition;
 
   function getLinePosition(lines, char) {
-  	var lineEnds,
-  	    line = 0,
-  	    lineStart = 0,
-  	    column;
+  	var line = 0;
+  	var lineStart = 0;
 
-  	lineEnds = lines.map(function (line) {
+  	var lineEnds = lines.map(function (line) {
   		var lineEnd = lineStart + line.length + 1; // +1 for the newline
 
   		lineStart = lineEnd;
   		return lineEnd;
   	});
 
+  	lineStart = 0;
+
   	while (char >= lineEnds[line]) {
   		lineStart = lineEnds[line];
   		line += 1;
   	}
 
-  	column = char - lineStart;
+  	var column = char - lineStart;
   	return { line: line, column: column, char: char };
   }
+
+  var src_parse = parse;
 
   var requirePattern = /require\s*\(\s*(?:"([^"]+)"|'([^']+)')\s*\)/g;
   var TEMPLATE_VERSION = 3;
   function parse(source) {
   	var parsed, template, links, imports, scriptItem, script, styles, match, modules, i, item, result;
 
-  	if (!rcu.Ractive) {
+  	if (!_rcu.Ractive) {
   		throw new Error("rcu has not been initialised! You must call rcu.init(Ractive) before rcu.parse()");
   	}
 
-  	parsed = rcu.Ractive.parse(source, {
+  	parsed = _rcu.Ractive.parse(source, {
   		noStringify: true,
   		interpolate: { script: false, style: false },
   		includeLinePositions: true
@@ -294,46 +300,39 @@ define(['ractive'], function (Ractive) {
 
   	// Extract names from links
   	imports = links.map(function (link) {
-  		var href, name;
-
-  		href = link.a.href;
-  		name = link.a.name || getName(href);
+  		var href = link.a.href;
+  		var name = link.a.name || src_getName(href);
 
   		if (typeof name !== "string") {
   			throw new Error("Error parsing link tag");
   		}
 
-  		return {
-  			name: name,
-  			href: href
-  		};
+  		return { name: name, href: href };
   	});
 
   	result = {
-  		source: source,
+  		source: source, imports: imports, modules: modules,
   		template: parsed,
-  		imports: imports,
   		css: styles.map(extractFragment).join(" "),
-  		script: "",
-  		modules: modules
+  		script: ""
   	};
 
   	// extract position information, so that we can generate source maps
   	if (scriptItem) {
-  		(function () {
-  			var contentStart, contentEnd, lines;
+  		var content = scriptItem.f[0];
 
-  			contentStart = source.indexOf(">", scriptItem.p[2]) + 1;
-  			contentEnd = contentStart + scriptItem.f[0].length;
+  		var contentStart = source.indexOf(">", scriptItem.p[2]) + 1;
 
-  			lines = source.split("\n");
+  		// we have to jump through some hoops to find contentEnd, because the contents
+  		// of the <script> tag get trimmed at parse time
+  		var contentEnd = contentStart + content.length + source.slice(contentStart).replace(content, "").indexOf("</script");
 
-  			result.scriptStart = getLinePosition(lines, contentStart);
-  			result.scriptEnd = getLinePosition(lines, contentEnd);
-  		})();
+  		var lines = source.split("\n");
 
-  		// Glue scripts together, for convenience
-  		result.script = scriptItem.f[0];
+  		result.scriptStart = utils_getLinePosition(lines, contentStart);
+  		result.scriptEnd = utils_getLinePosition(lines, contentEnd);
+
+  		result.script = source.slice(contentStart, contentEnd);
 
   		while (match = requirePattern.exec(result.script)) {
   			modules.push(match[1] || match[2]);
@@ -347,7 +346,12 @@ define(['ractive'], function (Ractive) {
   	return item.f;
   }
 
+  var _eval2 = eval2;
+
   var _eval, isBrowser, isNode, head, Module, base64Encode;
+
+  var SOURCE_MAPPING_URL = "sourceMappingUrl";
+  var DATA = "data";
 
   // This causes code to be eval'd in the global scope
   _eval = eval;
@@ -361,7 +365,16 @@ define(['ractive'], function (Ractive) {
   }
 
   if (typeof btoa === "function") {
-  	base64Encode = btoa;
+  	base64Encode = function (str) {
+  		str = str.replace(/[^\x00-\x7F]/g, function (char) {
+  			var hex = char.charCodeAt(0).toString(16);
+  			while (hex.length < 4) hex = "0" + hex;
+
+  			return "\\u" + hex;
+  		});
+
+  		return btoa(str);
+  	};
   } else if (typeof Buffer === "function") {
   	base64Encode = function (str) {
   		return new Buffer(str, "utf-8").toString("base64");
@@ -373,7 +386,7 @@ define(['ractive'], function (Ractive) {
   	options = options || {};
 
   	if (options.sourceMap) {
-  		script += "\n//# sourceMa" + "ppingURL=data:application/json;charset=utf-8;base64," + base64Encode(JSON.stringify(options.sourceMap));
+  		script += "\n//# " + SOURCE_MAPPING_URL + "=data:application/json;charset=utf-8;base64," + base64Encode(JSON.stringify(options.sourceMap));
   	} else if (options.sourceURL) {
   		script += "\n//# sourceURL=" + options.sourceURL;
   	}
@@ -435,7 +448,7 @@ define(['ractive'], function (Ractive) {
   function locateErrorUsingDataUri(code) {
   	var dataURI, scriptElement;
 
-  	dataURI = "da" + "ta:text/javascript;charset=utf-8," + encodeURIComponent(code);
+  	dataURI = DATA + ":text/javascript;charset=utf-8," + encodeURIComponent(code);
 
   	scriptElement = document.createElement("script");
   	scriptElement.src = dataURI;
@@ -562,9 +575,9 @@ define(['ractive'], function (Ractive) {
    * @param {string} str - the string to encode
    * @returns {string}
    */
-  var btoa__default = btoa__btoa;
+  var utils_btoa = utils_btoa__btoa;
 
-  function btoa__btoa(str) {
+  function utils_btoa__btoa(str) {
     return new Buffer(str).toString("base64");
   }
 
@@ -584,9 +597,11 @@ define(['ractive'], function (Ractive) {
   	},
 
   	toUrl: function () {
-  		return "data:application/json;charset=utf-8;base64," + btoa__default(this.toString());
+  		return "data:application/json;charset=utf-8;base64," + utils_btoa(this.toString());
   	}
   };
+
+  var utils_SourceMap = SourceMap;
 
   /**
    * Generates a v3 sourcemap between an original source and its built form
@@ -598,12 +613,22 @@ define(['ractive'], function (Ractive) {
    * @param {string=} options.file - the name of the generated file
    * @returns {object}
    */
-
+  var src_generateSourceMap = generateSourceMap;
+  var alreadyWarned = false;
   function generateSourceMap(definition, options) {
   	var lines, mappings, offset;
 
   	if (!options || !options.source) {
   		throw new Error("You must supply an options object with a `source` property to rcu.generateSourceMap()");
+  	}
+
+  	if ("padding" in options) {
+  		options.offset = options.padding;
+
+  		if (!alreadyWarned) {
+  			console.log("rcu: options.padding is deprecated, use options.offset instead");
+  			alreadyWarned = true;
+  		}
   	}
 
   	// The generated code probably includes a load of module gubbins - we don't bother
@@ -624,7 +649,7 @@ define(['ractive'], function (Ractive) {
   		return "AACA"; // equates to [ 0, 0, 1, 0 ];
   	}).join(";");
 
-  	return new SourceMap({
+  	return new utils_SourceMap({
   		file: options.file,
   		sources: [options.source],
   		sourcesContent: [definition.source],
@@ -633,6 +658,7 @@ define(['ractive'], function (Ractive) {
   	});
   }
 
+  var src_make = make;
   function make(source, config, callback, errback) {
   	var definition, url, createComponent, loadImport, imports, loadModule, modules, remainingDependencies, onloaded, ready;
 
@@ -643,7 +669,7 @@ define(['ractive'], function (Ractive) {
   	loadImport = config.loadImport;
   	loadModule = config.loadModule;
 
-  	definition = parse(source);
+  	definition = src_parse(source);
 
   	createComponent = function () {
   		var options, Component, factory, component, exports, prop;
@@ -656,18 +682,18 @@ define(['ractive'], function (Ractive) {
   		};
 
   		if (definition.script) {
-  			var sourceMap = generateSourceMap(definition, {
+  			var sourceMap = src_generateSourceMap(definition, {
   				source: url,
   				content: source
   			});
 
   			try {
-  				factory = new eval2.Function("component", "require", "Ractive", definition.script, {
+  				factory = new _eval2.Function("component", "require", "Ractive", definition.script, {
   					sourceMap: sourceMap
   				});
 
   				component = {};
-  				factory(component, config.require, rcu.Ractive);
+  				factory(component, config.require, _rcu.Ractive);
   				exports = component.exports;
 
   				if (typeof exports === "object") {
@@ -678,7 +704,7 @@ define(['ractive'], function (Ractive) {
   					}
   				}
 
-  				Component = rcu.Ractive.extend(options);
+  				Component = _rcu.Ractive.extend(options);
   			} catch (err) {
   				errback(err);
   				return;
@@ -686,7 +712,7 @@ define(['ractive'], function (Ractive) {
 
   			callback(Component);
   		} else {
-  			Component = rcu.Ractive.extend(options);
+  			Component = _rcu.Ractive.extend(options);
   			callback(Component);
   		}
   	};
@@ -778,15 +804,16 @@ define(['ractive'], function (Ractive) {
   		rcu.Ractive = copy;
   	},
 
-  	parse: parse,
-  	make: make,
-  	generateSourceMap: generateSourceMap,
+  	parse: src_parse,
+  	make: src_make,
+  	generateSourceMap: src_generateSourceMap,
   	resolve: resolve,
-  	getName: getName
+  	getName: src_getName
   };
 
   var _rcu = rcu;
 
+  var _load = load;
   function load(base, req, source, callback, errback) {
   	_rcu.make(source, {
   		url: "" + base + ".html",
@@ -809,7 +836,7 @@ define(['ractive'], function (Ractive) {
     zlib license: https://github.com/marcello3d/node-tosource/blob/master/LICENSE
   */
 
-
+  var tosource = toSource;
 
   function toSource(object, filter, indent, startingIndent) {
       var seen = [];
@@ -862,12 +889,13 @@ define(['ractive'], function (Ractive) {
 
   // TODO more intelligent minification? removing comments?
   // collapsing declarations?
-
+  var _minifycss = minifycss;
 
   function minifycss(css) {
   	return css.replace(/^\s+/gm, "");
   }
 
+  var _build = build;
   function build(name, source, callback) {
   	var definition = _rcu.parse(source);
   	var dependencies = ["require", "ractive"];
@@ -890,10 +918,10 @@ define(['ractive'], function (Ractive) {
   	// Add dependencies from inline require() calls
   	dependencies = dependencies.concat(definition.modules);
 
-  	var options = ["template: " + toSource(definition.template, null, "", "")];
+  	var options = ["template: " + tosource(definition.template, null, "", "")];
 
   	if (definition.css) {
-  		options.push("css: " + JSON.stringify(minifycss(definition.css)));
+  		options.push("css: " + JSON.stringify(_minifycss(definition.css)));
   	}
 
   	if (definition.imports.length) {
@@ -915,12 +943,14 @@ define(['ractive'], function (Ractive) {
 
   var rvc = amdLoader("rvc", "html", function (name, source, req, callback, errback, config) {
   	if (config.isBuild) {
-  		build(name, source, callback, errback);
+  		_build(name, source, callback, errback);
   	} else {
-  		load(name, req, source, callback, errback);
+  		_load(name, req, source, callback, errback);
   	}
   });
 
-  return rvc;
+  var _rvc = rvc;
+
+  return _rvc;
 
 });

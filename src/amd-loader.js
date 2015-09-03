@@ -64,7 +64,7 @@ var loader = function(pluginId, ext, allowExts, compile) {
           else
             load(compiled);
         }, load.error, config);
-      }, load.error);
+      }, load.error, ext);
     },
     write: function(pluginName, moduleName, write) {
       var compiled = this.buildCache[moduleName];
@@ -155,8 +155,10 @@ if (typeof window != 'undefined') {
   }
 }
 else if (typeof process !== 'undefined' && process.versions && !!process.versions.node) {
-  var fs = requirejs.nodeRequire('fs');
-  loader.fetch = function(path, callback) {
+  var fs = requirejs.nodeRequire('fs'),
+      p = requirejs.nodeRequire('path');
+  loader.fetch = function(path, callback, errback, ext) {
+    if(p.extname(path) === '') path += "." + ext;
     callback(fs.readFileSync(path, 'utf8'));
   }
 }
